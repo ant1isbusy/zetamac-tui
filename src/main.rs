@@ -61,12 +61,23 @@ impl Drop for TerminalSession {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AppState {
     StartScreen,
+    History,
     Running,
     Finished,
 }
 
+struct HistoryEntry {
+    timestamp: String,
+    attempt: usize,
+    score: usize,
+}
+
 struct Zetamac {
     state: AppState,
+    history_return_state: AppState,
+    history: Vec<HistoryEntry>,
+    history_error: Option<String>,
+    history_scroll: u16,
     attempt: usize,
     score: usize,
     duration: Duration,
@@ -81,6 +92,10 @@ impl Zetamac {
     fn new(attempt: usize) -> Self {
         let mut game = Self {
             state: AppState::StartScreen,
+            history_return_state: AppState::StartScreen,
+            history: Vec::new(),
+            history_error: None,
+            history_scroll: 0,
             attempt,
             score: 0,
             duration: Duration::from_secs(SPRINT_DURATION_SECS),
@@ -92,6 +107,22 @@ impl Zetamac {
         };
         game.next_problem();
         game
+    }
+
+    fn show_history(&mut self, return_state: AppState) {
+        self.history_return_state = return_state;
+        self.history_scroll = 0;
+        match read_history_csv() {
+            Ok(history) => {
+                self.history = history;
+                self.history_error = None;
+            }
+            Err(error) => {
+                self.history.clear();
+                self.history_error = Some(error.to_string());
+            }
+        }
+        self.state = AppState::History;
     }
 
     fn start(&mut self) {
@@ -214,7 +245,7 @@ fn next_attempt_number() -> io::Result<usize> {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "invalid attempt number in history CSV",
+                    "invalid attempt number in history csv",
                 )
             })?;
         count = count.max(attempt);
@@ -223,7 +254,73 @@ fn next_attempt_number() -> io::Result<usize> {
     count.checked_add(1).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "attempt number in history CSV is too large",
+            "attempt number in history csv is too large",
+        )
+    })
+}
+
+fn read_history_csv() -> io::Result<Vec<HistoryEntry>> {
+    let file = match File::open(LOG_FILE) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    if file.metadata()?.len() == 0 {
+        return Ok(Vec::new());
+    }
+
+    parse_history_csv(file)
+}
+
+fn parse_history_csv(reader: impl io::Read) -> io::Result<Vec<HistoryEntry>> {
+    let mut rdr = csv::Reader::from_reader(reader);
+    let headers = rdr.headers().map_err(io::Error::other)?.clone();
+    let timestamp_column = history_column_index(&headers, "timestamp")?;
+    let attempt_column = history_column_index(&headers, "attempt")?;
+    let score_column = history_column_index(&headers, "score")?;
+
+    let mut history = Vec::new();
+    for record in rdr.records() {
+        let record = record.map_err(io::Error::other)?;
+        let timestamp = record
+            .get(timestamp_column)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing timestamp"))?
+            .to_owned();
+        let attempt = parse_history_number(&record, attempt_column, "attempt")?;
+        let score = parse_history_number(&record, score_column, "score")?;
+        history.push(HistoryEntry {
+            timestamp,
+            attempt,
+            score,
+        });
+    }
+    Ok(history)
+}
+
+fn history_column_index(headers: &csv::StringRecord, column: &str) -> io::Result<usize> {
+    headers
+        .iter()
+        .position(|header| header == column)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("missing `{column}` column in history csv"),
+            )
+        })
+}
+
+fn parse_history_number<T>(record: &csv::StringRecord, column: usize, name: &str) -> io::Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = record
+        .get(column)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("missing `{name}`")))?;
+    value.parse().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid `{name}` in history csv: {error}"),
         )
     })
 }
@@ -278,11 +375,11 @@ fn ui(f: &mut Frame, game: &Zetamac) {
 
     match game.state {
         AppState::StartScreen => {
-            let card_area = fixed_centered_rect(44, 13, size);
+            let card_area = fixed_centered_rect(44, 15, size);
 
             let content = vec![
                 Line::from(vec![
-                    Span::styled("Z E T A M A C", Style::default().fg(THEME_ACCENT).bold()),
+                    Span::styled("z e t a m a c", Style::default().fg(THEME_ACCENT).bold()),
                     Span::styled(" tui", Style::default().fg(THEME_SUBTLE)),
                 ])
                 .alignment(Alignment::Center),
@@ -293,7 +390,7 @@ fn ui(f: &mut Frame, game: &Zetamac) {
                 .alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("Attempt   : ", Style::default().fg(THEME_SUBTLE)),
+                    Span::styled("attempt   : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
                         format!("#{}", game.attempt),
                         Style::default().fg(Color::White).bold(),
@@ -301,7 +398,7 @@ fn ui(f: &mut Frame, game: &Zetamac) {
                 ])
                 .alignment(Alignment::Center),
                 Line::from(vec![
-                    Span::styled("Duration  : ", Style::default().fg(THEME_SUBTLE)),
+                    Span::styled("duration  : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
                         format!("{}s", SPRINT_DURATION_SECS),
                         Style::default().fg(Color::White),
@@ -311,15 +408,20 @@ fn ui(f: &mut Frame, game: &Zetamac) {
                 Line::from(""),
                 Line::from(vec![
                     Span::styled(
-                        " [SPACE] ",
+                        " [space] ",
                         Style::default().bg(THEME_ACCENT).fg(Color::Black).bold(),
                     ),
-                    Span::styled("  Start sprint", Style::default().fg(Color::White)),
+                    Span::styled("  start sprint", Style::default().fg(Color::White)),
+                ])
+                .alignment(Alignment::Center),
+                Line::from(vec![
+                    Span::styled(" [h] ", Style::default().fg(THEME_ACCENT).bold()),
+                    Span::styled("  view past scores", Style::default().fg(Color::White)),
                 ])
                 .alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "[Esc] or [q] to exit",
+                    "[esc] or [q] to exit",
                     Style::default().fg(THEME_MUTED),
                 ))
                 .alignment(Alignment::Center),
@@ -333,6 +435,8 @@ fn ui(f: &mut Frame, game: &Zetamac) {
             );
             f.render_widget(p, card_area);
         }
+
+        AppState::History => history_ui(f, game),
 
         AppState::Running => {
             let layout = Layout::default()
@@ -354,13 +458,13 @@ fn ui(f: &mut Frame, game: &Zetamac) {
             };
 
             let header_line = Line::from(vec![
-                Span::styled("TIME ", Style::default().fg(THEME_MUTED).bold()),
+                Span::styled("time ", Style::default().fg(THEME_MUTED).bold()),
                 Span::styled(
                     format!("{:>3}s", rem_secs),
                     Style::default().fg(time_color).bold(),
                 ),
                 Span::styled("  │  ", Style::default().fg(THEME_MUTED)),
-                Span::styled("SCORE ", Style::default().fg(THEME_MUTED).bold()),
+                Span::styled("score ", Style::default().fg(THEME_MUTED).bold()),
                 Span::styled(
                     format!("{:<2}", game.score),
                     Style::default().fg(THEME_GREEN).bold(),
@@ -414,7 +518,10 @@ fn ui(f: &mut Frame, game: &Zetamac) {
             };
 
             let save_msg = if let Some(ref err) = game.save_error {
-                Span::styled(format!("error: {err}"), Style::default().fg(Color::Red))
+                Span::styled(
+                    format!("error: {}", err.to_lowercase()),
+                    Style::default().fg(Color::Red),
+                )
             } else {
                 Span::styled(
                     format!("saved → {LOG_FILE}"),
@@ -424,7 +531,7 @@ fn ui(f: &mut Frame, game: &Zetamac) {
 
             let summary = vec![
                 Line::from(vec![
-                    Span::styled("COMPLETE", Style::default().fg(THEME_GREEN).bold()),
+                    Span::styled("complete", Style::default().fg(THEME_GREEN).bold()),
                     Span::styled(" //", Style::default().fg(THEME_MUTED)),
                     Span::styled(" summary", Style::default().fg(THEME_SUBTLE)),
                 ])
@@ -436,7 +543,7 @@ fn ui(f: &mut Frame, game: &Zetamac) {
                 .alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("Attempt    : ", Style::default().fg(THEME_SUBTLE)),
+                    Span::styled("attempt    : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
                         format!("#{}", game.attempt),
                         Style::default().fg(Color::White),
@@ -444,7 +551,7 @@ fn ui(f: &mut Frame, game: &Zetamac) {
                 ])
                 .alignment(Alignment::Center),
                 Line::from(vec![
-                    Span::styled("Solved     : ", Style::default().fg(THEME_SUBTLE)),
+                    Span::styled("solved     : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
                         format!("{} eq.", game.score),
                         Style::default().fg(THEME_GREEN).bold(),
@@ -452,7 +559,7 @@ fn ui(f: &mut Frame, game: &Zetamac) {
                 ])
                 .alignment(Alignment::Center),
                 Line::from(vec![
-                    Span::styled("Avg Pace   : ", Style::default().fg(THEME_SUBTLE)),
+                    Span::styled("avg pace   : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
                         format!("{:.2}s / eq.", rate),
                         Style::default().fg(Color::White),
@@ -464,12 +571,14 @@ fn ui(f: &mut Frame, game: &Zetamac) {
                 Line::from(""),
                 Line::from(vec![
                     Span::styled(
-                        " [SPACE] ",
+                        " [space] ",
                         Style::default().bg(THEME_ACCENT).fg(Color::Black).bold(),
                     ),
-                    Span::styled(" Retry   ", Style::default().fg(Color::White)),
-                    Span::styled(" [Esc] ", Style::default().fg(THEME_MUTED)),
-                    Span::styled("Quit", Style::default().fg(THEME_SUBTLE)),
+                    Span::styled(" retry  ", Style::default().fg(Color::White)),
+                    Span::styled(" [h] ", Style::default().fg(THEME_ACCENT).bold()),
+                    Span::styled("history  ", Style::default().fg(Color::White)),
+                    Span::styled(" [esc] ", Style::default().fg(THEME_MUTED)),
+                    Span::styled("quit", Style::default().fg(THEME_SUBTLE)),
                 ])
                 .alignment(Alignment::Center),
             ];
@@ -483,6 +592,175 @@ fn ui(f: &mut Frame, game: &Zetamac) {
             f.render_widget(p, area);
         }
     }
+}
+
+fn history_ui(f: &mut Frame, game: &Zetamac) {
+    let area = f.area();
+    let outer = Block::default()
+        .title(" zetamac // history ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(THEME_MUTED));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let summary = if game.history_error.is_some() {
+        vec![Line::from(Span::styled(
+            "history unavailable; see details below.",
+            Style::default().fg(Color::Red),
+        ))]
+    } else if game.history.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "no completed sprints yet.",
+                Style::default().fg(THEME_SUBTLE),
+            )),
+            Line::from(Span::styled(
+                "complete a sprint to start tracking scores.",
+                Style::default().fg(THEME_MUTED),
+            )),
+        ]
+    } else {
+        let best = game
+            .history
+            .iter()
+            .map(|entry| entry.score)
+            .max()
+            .unwrap_or(0);
+        let average = game
+            .history
+            .iter()
+            .map(|entry| entry.score as f64)
+            .sum::<f64>()
+            / game.history.len() as f64;
+        vec![
+            Line::from(vec![
+                Span::styled("runs ", Style::default().fg(THEME_MUTED)),
+                Span::styled(
+                    game.history.len().to_string(),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled("   best ", Style::default().fg(THEME_MUTED)),
+                Span::styled(best.to_string(), Style::default().fg(THEME_GREEN).bold()),
+                Span::styled("   average ", Style::default().fg(THEME_MUTED)),
+                Span::styled(format!("{average:.1}"), Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("trend  ", Style::default().fg(THEME_MUTED)),
+                Span::styled("oldest → newest  ", Style::default().fg(THEME_SUBTLE)),
+                Span::styled(
+                    score_sparkline(&game.history),
+                    Style::default().fg(THEME_ACCENT),
+                ),
+            ]),
+        ]
+    };
+    let summary_block = Block::default()
+        .title("score overview")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(THEME_MUTED));
+    f.render_widget(Paragraph::new(summary).block(summary_block), sections[0]);
+
+    let results_block = Block::default()
+        .title(format!("past runs · {}", game.history.len()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(THEME_MUTED));
+    let results_inner = results_block.inner(sections[1]);
+    let results = if let Some(error) = &game.history_error {
+        vec![Line::from(Span::styled(
+            format!("could not read {LOG_FILE}: {}", error.to_lowercase()),
+            Style::default().fg(Color::Red),
+        ))]
+    } else if game.history.is_empty() {
+        vec![Line::from(Span::styled(
+            "no history to display.",
+            Style::default().fg(THEME_MUTED),
+        ))]
+    } else {
+        let mut lines = vec![Line::from(vec![
+            Span::styled("score", Style::default().fg(THEME_SUBTLE).bold()),
+            Span::raw("   "),
+            Span::styled("attempt", Style::default().fg(THEME_SUBTLE).bold()),
+            Span::raw("  "),
+            Span::styled("date / time", Style::default().fg(THEME_SUBTLE).bold()),
+        ])];
+        lines.extend(game.history.iter().rev().map(|entry| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>5}", entry.score),
+                    Style::default().fg(THEME_GREEN).bold(),
+                ),
+                Span::raw("   "),
+                Span::styled(
+                    format!("#{:<6}", entry.attempt),
+                    Style::default().fg(Color::White),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    entry.timestamp.to_lowercase(),
+                    Style::default().fg(THEME_SUBTLE),
+                ),
+            ])
+        }));
+        lines
+    };
+    let visible_lines = results_inner.height as usize;
+    let max_scroll = results.len().saturating_sub(visible_lines);
+    let scroll = usize::from(game.history_scroll)
+        .min(max_scroll)
+        .min(u16::MAX as usize) as u16;
+    f.render_widget(
+        Paragraph::new(results)
+            .block(results_block)
+            .scroll((scroll, 0)),
+        sections[1],
+    );
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(THEME_ACCENT)),
+        Span::styled(" scroll   ", Style::default().fg(THEME_MUTED)),
+        Span::styled("esc", Style::default().fg(THEME_ACCENT)),
+        Span::styled(" back   ", Style::default().fg(THEME_MUTED)),
+        Span::styled("q", Style::default().fg(THEME_ACCENT)),
+        Span::styled(" quit", Style::default().fg(THEME_MUTED)),
+    ]))
+    .alignment(Alignment::Center);
+    f.render_widget(footer, sections[2]);
+}
+
+fn score_sparkline(history: &[HistoryEntry]) -> String {
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    let scores: Vec<usize> = history
+        .iter()
+        .skip(history.len().saturating_sub(32))
+        .map(|entry| entry.score)
+        .collect();
+    let Some(min) = scores.iter().min().copied() else {
+        return String::new();
+    };
+    let max = scores.iter().max().copied().unwrap_or(min);
+
+    scores
+        .iter()
+        .map(|score| {
+            let level = if max == min {
+                3
+            } else {
+                (((score - min) as f64 / (max - min) as f64) * (LEVELS.len() - 1) as f64).round()
+                    as usize
+            };
+            LEVELS[level]
+        })
+        .collect()
 }
 
 fn main() -> io::Result<()> {
@@ -510,6 +788,29 @@ fn main() -> io::Result<()> {
                 AppState::StartScreen => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char(' ') | KeyCode::Enter => game.start(),
+                    KeyCode::Char('h') => game.show_history(AppState::StartScreen),
+                    _ => {}
+                },
+
+                AppState::History => match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Esc | KeyCode::Backspace => {
+                        game.state = game.history_return_state;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        game.history_scroll = game.history_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        game.history_scroll = game.history_scroll.saturating_add(1);
+                    }
+                    KeyCode::PageUp => {
+                        game.history_scroll = game.history_scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        game.history_scroll = game.history_scroll.saturating_add(10);
+                    }
+                    KeyCode::Home => game.history_scroll = 0,
+                    KeyCode::End => game.history_scroll = u16::MAX,
                     _ => {}
                 },
 
@@ -526,6 +827,7 @@ fn main() -> io::Result<()> {
 
                 AppState::Finished => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('h') => game.show_history(AppState::Finished),
                     KeyCode::Char(' ') | KeyCode::Enter => {
                         game = Zetamac::new(next_attempt_number()?);
                         game.start();
@@ -538,4 +840,34 @@ fn main() -> io::Result<()> {
 
     drop(terminal);
     session.restore()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_csv_is_read_by_column_name() {
+        let csv = "score,timestamp,attempt,duration_seconds,equations_per_second\n42,2026-10-10 12:34:56,7,120,21.00\n";
+        let history = parse_history_csv(csv.as_bytes()).unwrap();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].timestamp, "2026-10-10 12:34:56");
+        assert_eq!(history[0].attempt, 7);
+        assert_eq!(history[0].score, 42);
+    }
+
+    #[test]
+    fn score_sparkline_shows_recent_relative_trend() {
+        let history = [12, 24, 18]
+            .into_iter()
+            .map(|score| HistoryEntry {
+                timestamp: String::new(),
+                attempt: 0,
+                score,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(score_sparkline(&history), "▁█▅");
+    }
 }

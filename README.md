@@ -1,19 +1,16 @@
+# zetamac-tui
 
-<a href="https://github.com/ant1isbusy/zetamac-tui">
-  <img src="img/banner.png">
-</a>
+a ratatui-based [zetamac](https://arithmetic.zetamac.com/) arithmetic speed drill implementation.
 
-[Zetamac](https://arithmetic.zetamac.com/) arithmetic speed drills for the terminal. 
+![demo img](img/demo.png)
 
-![Demo img](img/demo.png)
+### motivation
 
-### Motivation
-
-The original web implementation does not store any results, and thus doesn't allow to track progress. Furthermore, it requires an internet connection.
+the original web implementation does not store any results, and thus doesn't allow to track progress. furthermore, it requires an internet connection.
 
 ### Details
 
-The current implementation of zetamac-tui uses the default Zetamac settings (2 minute timer). Successful runs are stored in the `zetamac_history.csv`, producing the columns: 
+the current implementation of zetamac-tui uses the default zetamac settings (2 minute timer). Successful runs are stored in the `zetamac_history.csv`, producing the columns: 
 
 - `timestamp` 
 - `attempt` 
