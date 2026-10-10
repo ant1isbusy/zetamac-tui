@@ -14,7 +14,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
@@ -22,9 +22,11 @@ use ratatui::{
 const LOG_FILE: &str = "zetamac_history.csv";
 const SPRINT_DURATION_SECS: u64 = 120;
 
-const ZEN_ACCENT: Color = Color::Indexed(110);
-const ZEN_MUTED: Color = Color::Indexed(243);
-const ZEN_SUCCESS: Color = Color::Indexed(108);
+const THEME_ACCENT: Color = Color::Rgb(136, 192, 208);
+const THEME_MUTED: Color = Color::Rgb(76, 86, 106);
+const THEME_SUBTLE: Color = Color::Rgb(140, 150, 170);
+const THEME_GREEN: Color = Color::Rgb(163, 190, 140);
+const THEME_YELLOW: Color = Color::Rgb(235, 203, 139);
 
 struct TerminalSession {
     active: bool,
@@ -63,7 +65,7 @@ enum AppState {
     Finished,
 }
 
-struct ZetamacZen {
+struct Zetamac {
     state: AppState,
     attempt: usize,
     score: usize,
@@ -75,7 +77,7 @@ struct ZetamacZen {
     save_error: Option<String>,
 }
 
-impl ZetamacZen {
+impl Zetamac {
     fn new(attempt: usize) -> Self {
         let mut game = Self {
             state: AppState::StartScreen,
@@ -161,6 +163,15 @@ impl ZetamacZen {
             .map(|error| error.to_string());
     }
 
+    fn remaining_secs(&self) -> u64 {
+        if let Some(start) = self.start_instant {
+            let elapsed = Instant::now().saturating_duration_since(start);
+            self.duration.saturating_sub(elapsed).as_secs()
+        } else {
+            self.duration.as_secs()
+        }
+    }
+
     fn handle_digit(&mut self, ch: char) {
         self.update_timer();
         if self.state != AppState::Running {
@@ -231,7 +242,7 @@ fn log_result_csv(attempt: usize, score: usize, duration: u64, rate: f64) -> io:
             "attempt",
             "score",
             "duration_seconds",
-            "rate_per_minute",
+            "equations_per_second",
         ])?;
     }
 
@@ -262,191 +273,212 @@ fn fixed_centered_rect(width: u16, height: u16, r: Rect) -> Rect {
     }
 }
 
-fn ui(f: &mut Frame, game: &ZetamacZen) {
+fn ui(f: &mut Frame, game: &Zetamac) {
     let size = f.area();
 
     match game.state {
         AppState::StartScreen => {
-            let area = fixed_centered_rect(48, 15, size);
+            let card_area = fixed_centered_rect(44, 13, size);
 
             let content = vec![
+                Line::from(vec![
+                    Span::styled("Z E T A M A C", Style::default().fg(THEME_ACCENT).bold()),
+                    Span::styled(" tui", Style::default().fg(THEME_SUBTLE)),
+                ])
+                .alignment(Alignment::Center),
                 Line::from(Span::styled(
-                    "zetamac-tui",
-                    Style::default().fg(ZEN_ACCENT).bold(),
-                )),
+                    "─".repeat(34),
+                    Style::default().fg(THEME_MUTED),
+                ))
+                .alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("Attempt : ", Style::default().fg(ZEN_MUTED)),
+                    Span::styled("Attempt   : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
                         format!("#{}", game.attempt),
+                        Style::default().fg(Color::White).bold(),
+                    ),
+                ])
+                .alignment(Alignment::Center),
+                Line::from(vec![
+                    Span::styled("Duration  : ", Style::default().fg(THEME_SUBTLE)),
+                    Span::styled(
+                        format!("{}s", SPRINT_DURATION_SECS),
                         Style::default().fg(Color::White),
                     ),
-                ]),
+                ])
+                .alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled(
                         " [SPACE] ",
-                        Style::default().bg(ZEN_ACCENT).fg(Color::Black).bold(),
+                        Style::default().bg(THEME_ACCENT).fg(Color::Black).bold(),
                     ),
-                    Span::raw("  Begin"),
-                ]),
+                    Span::styled("  Start sprint", Style::default().fg(Color::White)),
+                ])
+                .alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(Span::styled(
                     "[Esc] or [q] to exit",
-                    Style::default().fg(ZEN_MUTED),
-                )),
+                    Style::default().fg(THEME_MUTED),
+                ))
+                .alignment(Alignment::Center),
             ];
 
-            let p = Paragraph::new(content).alignment(Alignment::Center).block(
+            let p = Paragraph::new(content).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(ZEN_MUTED)),
+                    .border_type(BorderType::Double)
+                    .border_style(Style::default().fg(THEME_MUTED)),
             );
-            f.render_widget(p, area);
+            f.render_widget(p, card_area);
         }
 
         AppState::Running => {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(2), // solved counter
-                    Constraint::Min(6),    // math card
-                    Constraint::Length(2), // exit hint
+                    Constraint::Length(3),
+                    Constraint::Fill(1),
+                    Constraint::Length(2),
                 ])
                 .split(size);
 
-            // Subtle solved counter in the corner
-            let counter = Paragraph::new(Line::from(vec![
-                Span::styled("solved: ", Style::default().fg(ZEN_MUTED)),
-                Span::styled(format!("{}", game.score), Style::default().fg(Color::White)),
-                Span::raw("   "),
-            ]))
-            .alignment(Alignment::Right);
-            f.render_widget(counter, layout[0]);
-
-            // Focused, calm math card
-            let card_area = fixed_centered_rect(42, 10, layout[1]);
-
-            let card_block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(ZEN_ACCENT));
-
-            f.render_widget(card_block, card_area);
-
-            let inner_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(1)
-                .constraints([
-                    Constraint::Length(3), // math expression
-                    Constraint::Length(3), // answer input
-                ])
-                .split(card_area);
-
-            let prompt_text = Paragraph::new(Line::from(Span::styled(
-                &game.current_prompt,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .alignment(Alignment::Center);
-            f.render_widget(prompt_text, inner_chunks[0]);
-
-            let input_display = if game.input_buffer.is_empty() {
-                "·".to_string()
+            let rem_secs = game.remaining_secs();
+            let time_color = if rem_secs <= 10 {
+                Color::LightRed
+            } else if rem_secs <= 30 {
+                THEME_YELLOW
             } else {
-                format!("{}▎", game.input_buffer)
+                THEME_ACCENT
             };
 
-            let input_box = Paragraph::new(Line::from(vec![
-                Span::styled("= ", Style::default().fg(ZEN_MUTED)),
-                Span::styled(input_display, Style::default().fg(ZEN_SUCCESS).bold()),
-            ]))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .border_style(Style::default().fg(ZEN_MUTED)),
-            );
-            f.render_widget(input_box, inner_chunks[1]);
+            let header_line = Line::from(vec![
+                Span::styled("TIME ", Style::default().fg(THEME_MUTED).bold()),
+                Span::styled(
+                    format!("{:>3}s", rem_secs),
+                    Style::default().fg(time_color).bold(),
+                ),
+                Span::styled("  │  ", Style::default().fg(THEME_MUTED)),
+                Span::styled("SCORE ", Style::default().fg(THEME_MUTED).bold()),
+                Span::styled(
+                    format!("{:<2}", game.score),
+                    Style::default().fg(THEME_GREEN).bold(),
+                ),
+            ])
+            .alignment(Alignment::Center);
 
-            let footer = Paragraph::new(Span::styled(
-                "[Esc] or [q] to stop early",
-                Style::default().fg(ZEN_MUTED),
-            ))
+            let header_bar = Paragraph::new(header_line)
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(Style::default().fg(THEME_MUTED)),
+                );
+            f.render_widget(header_bar, layout[0]);
+
+            let input_len = game.input_buffer.len();
+            let padding_spaces = 3usize.saturating_sub(input_len);
+
+            let math_lines = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(
+                        &game.current_prompt,
+                        Style::default().fg(Color::White).bold(),
+                    ),
+                    Span::styled("  =  ", Style::default().fg(THEME_MUTED).bold()),
+                    Span::styled(&game.input_buffer, Style::default().fg(THEME_YELLOW).bold()),
+                    Span::styled("▌", Style::default().fg(THEME_ACCENT)),
+                    Span::raw(" ".repeat(padding_spaces)),
+                ])
+                .alignment(Alignment::Center),
+            ];
+
+            let math_card = Paragraph::new(math_lines).alignment(Alignment::Center);
+            f.render_widget(math_card, layout[1]);
+            let footer = Paragraph::new(Line::from(vec![
+                Span::styled("esc", Style::default().fg(THEME_SUBTLE)),
+                Span::styled("  abandon sprint", Style::default().fg(THEME_MUTED)),
+            ]))
             .alignment(Alignment::Center);
             f.render_widget(footer, layout[2]);
         }
-
         AppState::Finished => {
-            let area = fixed_centered_rect(50, 16, size);
+            let area = fixed_centered_rect(44, 15, size);
             let secs = game.duration.as_secs_f64();
-            let rate = if secs > 0.0 {
-                (game.score as f64 / secs) * 60.0
+            let rate = if game.score > 0 {
+                secs / game.score as f64
             } else {
                 0.0
             };
-            let save_status = game.save_error.as_ref().map_or_else(
-                || format!("Saved to {LOG_FILE}"),
-                |error| format!("Save failed: {error}"),
-            );
-            let save_style = if game.save_error.is_some() {
-                Style::default().fg(Color::Red)
+
+            let save_msg = if let Some(ref err) = game.save_error {
+                Span::styled(format!("error: {err}"), Style::default().fg(Color::Red))
             } else {
-                Style::default().fg(ZEN_MUTED)
+                Span::styled(
+                    format!("saved → {LOG_FILE}"),
+                    Style::default().fg(THEME_MUTED),
+                )
             };
 
             let summary = vec![
+                Line::from(vec![
+                    Span::styled("COMPLETE", Style::default().fg(THEME_GREEN).bold()),
+                    Span::styled(" //", Style::default().fg(THEME_MUTED)),
+                    Span::styled(" summary", Style::default().fg(THEME_SUBTLE)),
+                ])
+                .alignment(Alignment::Center),
                 Line::from(Span::styled(
-                    "s e s s i o n   c o m p l e t e",
-                    Style::default().fg(ZEN_ACCENT).bold(),
-                )),
+                    "─".repeat(34),
+                    Style::default().fg(THEME_MUTED),
+                ))
+                .alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("Attempt  : ", Style::default().fg(ZEN_MUTED)),
+                    Span::styled("Attempt    : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
                         format!("#{}", game.attempt),
                         Style::default().fg(Color::White),
                     ),
-                ]),
+                ])
+                .alignment(Alignment::Center),
                 Line::from(vec![
-                    Span::styled("Solved   : ", Style::default().fg(ZEN_MUTED)),
+                    Span::styled("Solved     : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
-                        format!("{} equations", game.score),
-                        Style::default().fg(ZEN_SUCCESS).bold(),
+                        format!("{} eq.", game.score),
+                        Style::default().fg(THEME_GREEN).bold(),
                     ),
-                ]),
+                ])
+                .alignment(Alignment::Center),
                 Line::from(vec![
-                    Span::styled("Pace     : ", Style::default().fg(ZEN_MUTED)),
+                    Span::styled("Avg Pace   : ", Style::default().fg(THEME_SUBTLE)),
                     Span::styled(
-                        format!("{:.1} / min", rate),
+                        format!("{:.2}s / eq.", rate),
                         Style::default().fg(Color::White),
                     ),
-                ]),
+                ])
+                .alignment(Alignment::Center),
                 Line::from(""),
-                Line::from(Span::styled(save_status, save_style)),
+                Line::from(save_msg).alignment(Alignment::Center),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled(
                         " [SPACE] ",
-                        Style::default().bg(ZEN_ACCENT).fg(Color::Black).bold(),
+                        Style::default().bg(THEME_ACCENT).fg(Color::Black).bold(),
                     ),
-                    Span::raw("  Another session"),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "[Esc] or [q] to exit",
-                    Style::default().fg(ZEN_MUTED),
-                )),
+                    Span::styled(" Retry   ", Style::default().fg(Color::White)),
+                    Span::styled(" [Esc] ", Style::default().fg(THEME_MUTED)),
+                    Span::styled("Quit", Style::default().fg(THEME_SUBTLE)),
+                ])
+                .alignment(Alignment::Center),
             ];
 
-            let p = Paragraph::new(summary).alignment(Alignment::Center).block(
+            let p = Paragraph::new(summary).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(ZEN_MUTED)),
+                    .border_type(BorderType::Double)
+                    .border_style(Style::default().fg(THEME_MUTED)),
             );
             f.render_widget(p, area);
         }
@@ -458,7 +490,7 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut game = ZetamacZen::new(next_attempt_number()?);
+    let mut game = Zetamac::new(next_attempt_number()?);
     let tick_rate = Duration::from_millis(25);
 
     loop {
@@ -495,7 +527,7 @@ fn main() -> io::Result<()> {
                 AppState::Finished => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char(' ') | KeyCode::Enter => {
-                        game = ZetamacZen::new(next_attempt_number()?);
+                        game = Zetamac::new(next_attempt_number()?);
                         game.start();
                     }
                     _ => {}
