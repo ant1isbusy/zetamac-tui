@@ -641,27 +641,17 @@ fn history_ui(f: &mut Frame, game: &Zetamac) {
             .map(|entry| entry.score as f64)
             .sum::<f64>()
             / game.history.len() as f64;
-        vec![
-            Line::from(vec![
-                Span::styled("runs ", Style::default().fg(THEME_MUTED)),
-                Span::styled(
-                    game.history.len().to_string(),
-                    Style::default().fg(Color::White),
-                ),
-                Span::styled("   best ", Style::default().fg(THEME_MUTED)),
-                Span::styled(best.to_string(), Style::default().fg(THEME_GREEN).bold()),
-                Span::styled("   average ", Style::default().fg(THEME_MUTED)),
-                Span::styled(format!("{average:.1}"), Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("trend  ", Style::default().fg(THEME_MUTED)),
-                Span::styled("oldest → newest  ", Style::default().fg(THEME_SUBTLE)),
-                Span::styled(
-                    score_sparkline(&game.history),
-                    Style::default().fg(THEME_ACCENT),
-                ),
-            ]),
-        ]
+        vec![Line::from(vec![
+            Span::styled("runs ", Style::default().fg(THEME_MUTED)),
+            Span::styled(
+                game.history.len().to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("   best ", Style::default().fg(THEME_MUTED)),
+            Span::styled(best.to_string(), Style::default().fg(THEME_GREEN).bold()),
+            Span::styled("   average ", Style::default().fg(THEME_MUTED)),
+            Span::styled(format!("{average:.1}"), Style::default().fg(Color::White)),
+        ])]
     };
     let summary_block = Block::default()
         .title("score overview")
@@ -734,33 +724,6 @@ fn history_ui(f: &mut Frame, game: &Zetamac) {
     ]))
     .alignment(Alignment::Center);
     f.render_widget(footer, sections[2]);
-}
-
-fn score_sparkline(history: &[HistoryEntry]) -> String {
-    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-    let scores: Vec<usize> = history
-        .iter()
-        .skip(history.len().saturating_sub(32))
-        .map(|entry| entry.score)
-        .collect();
-    let Some(min) = scores.iter().min().copied() else {
-        return String::new();
-    };
-    let max = scores.iter().max().copied().unwrap_or(min);
-
-    scores
-        .iter()
-        .map(|score| {
-            let level = if max == min {
-                3
-            } else {
-                (((score - min) as f64 / (max - min) as f64) * (LEVELS.len() - 1) as f64).round()
-                    as usize
-            };
-            LEVELS[level]
-        })
-        .collect()
 }
 
 fn main() -> io::Result<()> {
@@ -840,34 +803,4 @@ fn main() -> io::Result<()> {
 
     drop(terminal);
     session.restore()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn history_csv_is_read_by_column_name() {
-        let csv = "score,timestamp,attempt,duration_seconds,equations_per_second\n42,2026-10-10 12:34:56,7,120,21.00\n";
-        let history = parse_history_csv(csv.as_bytes()).unwrap();
-
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].timestamp, "2026-10-10 12:34:56");
-        assert_eq!(history[0].attempt, 7);
-        assert_eq!(history[0].score, 42);
-    }
-
-    #[test]
-    fn score_sparkline_shows_recent_relative_trend() {
-        let history = [12, 24, 18]
-            .into_iter()
-            .map(|score| HistoryEntry {
-                timestamp: String::new(),
-                attempt: 0,
-                score,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(score_sparkline(&history), "▁█▅");
-    }
 }
