@@ -1,0 +1,11 @@
+[package]
+name = "zetamac-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+rand = "0.9"
+chrono = "0.4"
+csv = "1.4"
